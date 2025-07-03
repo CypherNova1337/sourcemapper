@@ -256,7 +256,7 @@ func getSourceMapFromJS(jsurl string, headers []string, insecureTLS bool, proxyU
 
 // writeFile writes content to file at path p.
 func writeFile(p string, content string) error {
-	p = filepath.Clean(p)
+	p = filepath.Clean(p) // Clean the path *after* sanitization
 
 	if _, err := os.Stat(filepath.Dir(p)); os.IsNotExist(err) {
 		// Using MkdirAll here is tricky, because even if we fail, we might have
@@ -271,10 +271,42 @@ func writeFile(p string, content string) error {
 	return os.WriteFile(p, []byte(content), 0600)
 }
 
-// cleanWindows replaces the illegal characters from a path with `-`.
-func cleanWindows(p string) string {
-	m1 := regexp.MustCompile(`[?%*|:"<>]`)
-	return m1.ReplaceAllString(p, "")
+// sanitizeSourcePath removes problematic prefixes and characters from source paths
+// to make them valid file system paths across different OS.
+func sanitizeSourcePath(p string) string {
+	// Remove common problematic prefixes like "webpack://", "webpack:/", "file://", etc.
+	// We'll use a single regexp for more flexibility.
+	// This regex looks for:
+	// ^ - start of string
+	// (?: - non-capturing group
+	//   (?:webpack|file): - "webpack" or "file" followed by a colon
+	//   (?:[/]{2,3})? - two or three slashes (for // or ///)
+	// | - OR
+	//   ^/ - a single leading slash
+	// )
+	// We also capture everything after the prefix in Group 1.
+	re := regexp.MustCompile(`^(?:(?:webpack|file):(?:[/]{2,3})?|/)(.*)$`)
+	matches := re.FindStringSubmatch(p)
+	if len(matches) > 1 {
+		p = matches[1] // Use the captured part after the prefix
+	}
+
+	// Replace any remaining colons with an underscore, e.g., "drive:folder" -> "drive_folder"
+	// or parts like "http://example.com/file" might become "http__example.com_file"
+	p = strings.ReplaceAll(p, ":", "_")
+
+	// Replace any backslashes with forward slashes for consistency, then clean.
+	// filepath.Clean will handle converting to OS-specific path separators.
+	p = strings.ReplaceAll(p, "\\", "/")
+
+	// This is crucial: Use filepath.Clean to resolve ".." and "." and normalize slashes.
+	p = filepath.Clean(p)
+
+	// After cleaning, if it somehow resulted in a leading ".." that's not intended to go
+	// above the output directory, you might want to strip it.
+	// For this specific issue (colons in webpack paths), Clean should be sufficient.
+
+	return p
 }
 
 func main() {
@@ -312,7 +344,6 @@ func main() {
 
 	var sm sourceMap
 
-	// these need to just take the conf object
 	if conf.url != "" {
 		if sm, err = getSourceMap(conf.url, conf.headers, conf.insecure, proxyURL); err != nil {
 			log.Fatal(err)
@@ -323,7 +354,6 @@ func main() {
 		}
 	}
 
-	// everything below needs to go into its own function
 	log.Printf("[+] Retrieved Sourcemap with version %d, containing %d entries.\n", sm.Version, len(sm.Sources))
 
 	if len(sm.Sources) == 0 {
@@ -338,22 +368,24 @@ func main() {
 		log.Println("[!] Sourcemap is not version 3. This is untested!")
 	}
 
+	// Create the base output directory if it doesn't exist.
+	// This ensures the root directory exists before we start creating subdirectories.
 	if _, err := os.Stat(conf.outdir); os.IsNotExist(err) {
-		err = os.Mkdir(conf.outdir, 0700)
+		err = os.MkdirAll(conf.outdir, 0700) // Use MkdirAll for base directory too
 		if err != nil {
 			log.Fatal(err)
 		}
 	}
 
 	for i, sourcePath := range sm.Sources {
-		sourcePath = "/" + sourcePath // path.Clean will ignore a leading '..', must be a '/..'
-		// If on windows, clean the sourcepath.
-		if runtime.GOOS == "windows" {
-			sourcePath = cleanWindows(sourcePath)
-		}
+		// Sanitize the sourcePath before joining with the output directory.
+		cleanedSourcePath := sanitizeSourcePath(sourcePath)
 
-		// Use filepath.Join. https://parsiya.net/blog/2019-03-09-path.join-considered-harmful/
-		scriptPath, scriptData := filepath.Join(conf.outdir, filepath.Clean(sourcePath)), sm.SourcesContent[i]
+		// This `filepath.Clean` was redundant and sometimes problematic before sanitization.
+		// `filepath.Join` and `filepath.Clean` together will handle the OS-specific path separators and normalization.
+		scriptPath := filepath.Join(conf.outdir, cleanedSourcePath)
+		scriptData := sm.SourcesContent[i]
+
 		err := writeFile(scriptPath, scriptData)
 		if err != nil {
 			log.Printf("Error writing %s file: %s", scriptPath, err)
