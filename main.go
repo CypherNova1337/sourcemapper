@@ -15,7 +15,6 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"runtime"
 	"strings"
 )
 
@@ -300,11 +299,9 @@ func sanitizeSourcePath(p string) string {
 	p = strings.ReplaceAll(p, "\\", "/")
 
 	// This is crucial: Use filepath.Clean to resolve ".." and "." and normalize slashes.
-	p = filepath.Clean(p)
-
-	// After cleaning, if it somehow resulted in a leading ".." that's not intended to go
-	// above the output directory, you might want to strip it.
-	// For this specific issue (colons in webpack paths), Clean should be sufficient.
+	// Cleaning from a leading "/" stops "../" entries from climbing above the
+	// output directory, since filepath.Clean keeps a leading ".." on relative paths.
+	p = filepath.Clean("/" + p)
 
 	return p
 }
